@@ -5,6 +5,8 @@
  */
 
 const SHEET_NAME = '릴스제보';
+const PROFILE_SHEET = '조사자 정보';            // 순서 | 별명 | 이름 | 성별 | 나이
+const PROFILE_HEADERS = ['이름', '성별', '나이']; // 릴스제보 탭 맨 오른쪽에 자동으로 채워짐
 const HEADERS = [
   '제출일시', '별명', '학년', 'URL', '플랫폼',
   '추천 점수(1~5)', '어떤 영상?', '왜 끌렸어?', '나의 반응', '대학 계정이 해도 볼래?',
@@ -117,8 +119,43 @@ function submitReel(data) {
       clean_(data.comment),
       ''
     ]);
+    syncProfiles_(sh);
     return { ok: true };
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * 조사자 정보 탭의 별명 → 이름·성별·나이를 릴스제보 탭 오른쪽 열에 채움
+ * 제보가 들어올 때마다 전체를 다시 맞추므로, 조사자 정보에 별명을 나중에 적어도 다음 제보 때 과거 줄까지 반영됨
+ * 수동으로 바로 반영하려면 편집기에서 syncProfilesNow 실행
+ */
+function syncProfiles_(sh) {
+  const ss = sh.getParent();
+  const ps = ss.getSheetByName(PROFILE_SHEET);
+  if (!ps) return;
+
+  const map = {};
+  const plast = ps.getLastRow();
+  if (plast > 1) {
+    ps.getRange(2, 2, plast - 1, 4).getValues().forEach(r => {
+      const nick = String(r[0]).trim();
+      if (nick) map[nick] = [r[1], r[2], r[3]];
+    });
+  }
+
+  const startCol = HEADERS.length + 1;
+  sh.getRange(1, startCol, 1, PROFILE_HEADERS.length).setValues([PROFILE_HEADERS])
+    .setFontWeight('bold').setBackground('#4a6a8f').setFontColor('#ffffff');
+
+  const last = sh.getLastRow();
+  if (last < 2) return;
+  const nicks = sh.getRange(2, 2, last - 1, 1).getValues();
+  const out = nicks.map(r => map[String(r[0]).trim()] || ['미등록', '', '']);
+  sh.getRange(2, startCol, out.length, PROFILE_HEADERS.length).setValues(out);
+}
+
+function syncProfilesNow() {
+  syncProfiles_(getSheet_());
 }
