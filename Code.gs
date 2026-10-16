@@ -159,3 +159,144 @@ function syncProfiles_(sh) {
 function syncProfilesNow() {
   syncProfiles_(getSheet_());
 }
+
+/* =====================================================================
+ *  📊 분석 탭 — 메뉴 [📊 릴스 분석 → 분석 새로고침] 또는 매일 아침 자동 갱신
+ * ===================================================================== */
+const REPORT_SHEET = '분석';
+const STRONG_ACTIONS = ['여러 번 돌려봄', '친구 태그/공유', '저장', '계정 팔로우']; // "강한 반응"
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('📊 릴스 분석')
+    .addItem('분석 새로고침', 'buildReport')
+    .addItem('매일 아침 8시 자동 갱신 켜기', 'enableDailyReport')
+    .addToUi();
+}
+
+function enableDailyReport() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'buildReport')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('buildReport').timeBased().everyDays(1).atHour(8).create();
+  try { SpreadsheetApp.getUi().alert('매일 아침 8시에 분석 탭이 자동으로 갱신돼요.'); } catch (e) {}
+}
+
+/** 순수 계산부: 시트 값(2차원 배열) → 표 블록들 */
+function computeReport_(values) {
+  const head = values[0].map(String);
+  const col = name => head.indexOf(name);
+  const split = v => String(v == null ? '' : v).split(',').map(s => s.trim()).filter(Boolean);
+  const C = {
+    nick: col('별명'), grade: col('학년'), url: col('URL'), score: col('추천 점수(1~5)'),
+    kind: col('어떤 영상?'), why: col('왜 끌렸어?'), act: col('나의 반응'),
+    univ: col('대학 계정이 해도 볼래?'), comment: col('한마디'), gender: col('성별')
+  };
+  const recs = values.slice(1).filter(r => r[C.url]).map(r => {
+    const acts = split(r[C.act]);
+    return {
+      nick: String(r[C.nick] || ''), grade: r[C.grade] ? r[C.grade] + '학년' : '미입력',
+      gender: C.gender >= 0 && r[C.gender] && r[C.gender] !== '미등록' ? String(r[C.gender]) : '미등록',
+      url: r[C.url], score: Number(r[C.score]) || 0,
+      kinds: split(r[C.kind]), whys: split(r[C.why]), acts: acts,
+      univYes: r[C.univ] === '볼 것 같다',
+      strong: acts.some(a => STRONG_ACTIONS.indexOf(a) !== -1),
+      comment: String(r[C.comment] || '')
+    };
+  });
+  const N = recs.length;
+  const pct = (a, b) => b ? a / b : 0;
+
+  function group(getList) {
+    const m = {};
+    recs.forEach(r => getList(r).forEach(k => {
+      const g = m[k] || (m[k] = { n: 0, s: 0, u: 0, st: 0 });
+      g.n++; g.s += r.score; g.u += r.univYes ? 1 : 0; g.st += r.strong ? 1 : 0;
+    }));
+    return Object.keys(m).map(k => [k, m[k].n, pct(m[k].n, N), pct(m[k].s, m[k].n), pct(m[k].u, m[k].n), pct(m[k].st, m[k].n)])
+      .sort((a, b) => b[1] - a[1] || b[3] - a[3]);
+  }
+  function cross(segOf, getList) {
+    const segs = {}, cnt = {};
+    recs.forEach(r => {
+      const s = segOf(r); segs[s] = (segs[s] || 0) + 1;
+      getList(r).forEach(k => { cnt[k] = cnt[k] || {}; cnt[k][s] = (cnt[k][s] || 0) + 1; });
+    });
+    const segKeys = Object.keys(segs).sort();
+    const rows = Object.keys(cnt).map(k => [k].concat(segKeys.map(s => pct(cnt[k][s] || 0, segs[s]))))
+      .sort((a, b) => b.slice(1).reduce((x, y) => x + y, 0) - a.slice(1).reduce((x, y) => x + y, 0));
+    return { headers: ['영상 유형'].concat(segKeys.map(s => `${s} (${segs[s]}건)`)), rows: rows };
+  }
+  const statHead = ['항목', '건수', '전체 대비', '평균 별점', '대학계정 OK', '강한 반응'];
+  const statFmt = [null, '0', '0%', '0.0', '0%', '0%'];
+  const nicks = {}; recs.forEach(r => nicks[r.nick] = 1);
+
+  const top = recs.filter(r => r.score >= 4 && r.univYes)
+    .sort((a, b) => b.score - a.score || (b.strong - a.strong))
+    .slice(0, 20)
+    .map(r => [r.score, r.kinds.join(', '), r.whys.join(', '), r.acts.join(', '), r.comment, r.url]);
+
+  return [
+    { title: '① 한눈에 보기', headers: ['지표', '값'], fmt: [null, null], rows: [
+      ['총 제보', N + '건'],
+      ['참여 조사자', Object.keys(nicks).length + '명'],
+      ['평균 별점', N ? (recs.reduce((s, r) => s + r.score, 0) / N).toFixed(2) + ' / 5' : '-'],
+      ['"대학 계정이 해도 볼 것 같다"', Math.round(pct(recs.filter(r => r.univYes).length, N) * 100) + '%'],
+      ['강한 반응(돌려봄·공유·저장·팔로우)', Math.round(pct(recs.filter(r => r.strong).length, N) * 100) + '%']
+    ] },
+    { title: '② 어떤 영상에 반응했나 (영상 유형)', headers: statHead, fmt: statFmt, rows: group(r => r.kinds), chart: '영상 유형별 제보 수' },
+    { title: '③ 왜 끝까지 봤나 (끌린 이유)', headers: statHead, fmt: statFmt, rows: group(r => r.whys), chart: '끌린 이유별 제보 수' },
+    { title: '④ 보고 나서 한 행동', headers: statHead, fmt: statFmt, rows: group(r => r.acts) },
+    Object.assign({ title: '⑤ 성별로 좋아하는 영상 유형 (각 성별 제보 중 비율)', fmtAll: '0%' }, cross(r => r.gender, r => r.kinds)),
+    Object.assign({ title: '⑥ 학년별로 좋아하는 영상 유형 (각 학년 제보 중 비율)', fmtAll: '0%' }, cross(r => r.grade, r => r.kinds)),
+    { title: '⑦ 벤치마킹 후보 (별점 4+ & 대학 계정이 해도 볼 것 같다)', headers: ['별점', '영상 유형', '끌린 이유', '반응', '한마디', 'URL'], fmt: ['0', null, null, null, null, null], rows: top }
+  ];
+}
+
+function buildReport() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const src = getSheet_();
+  syncProfiles_(src);
+  const blocks = computeReport_(src.getDataRange().getValues());
+
+  let sh = ss.getSheetByName(REPORT_SHEET) || ss.insertSheet(REPORT_SHEET, 0);
+  sh.getCharts().forEach(c => sh.removeChart(c));
+  sh.clear();
+  sh.setConditionalFormatRules([]);
+  sh.getRange('A1').setValue('📊 요즘 본 릴스 — 학생 반응 분석').setFontSize(16).setFontWeight('bold');
+  sh.getRange('A2').setValue('마지막 갱신: ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm') +
+    '   ·   대학계정 OK = "볼 것 같다" 비율   ·   강한 반응 = 여러 번 돌려봄/공유/저장/팔로우 중 하나 이상').setFontColor('#6b7686');
+
+  let row = 4;
+  blocks.forEach(b => {
+    const w = b.headers.length;
+    sh.getRange(row, 1).setValue(b.title).setFontWeight('bold').setFontSize(12).setFontColor('#1f3a5f');
+    row++;
+    sh.getRange(row, 1, 1, w).setValues([b.headers])
+      .setFontWeight('bold').setBackground('#1f3a5f').setFontColor('#ffffff');
+    const body = b.rows.length ? b.rows : [[ '데이터 없음' ].concat(new Array(w - 1).fill(''))];
+    const rng = sh.getRange(row + 1, 1, body.length, w);
+    rng.setValues(body);
+    for (let i = 0; i < w; i++) {
+      const f = b.fmtAll && i > 0 ? b.fmtAll : (b.fmt ? b.fmt[i] : null);
+      if (f) sh.getRange(row + 1, i + 1, body.length, 1).setNumberFormat(f);
+    }
+    if (b.fmtAll && b.rows.length) {  // 비율표는 진할수록 높게
+      const heat = sh.getRange(row + 1, 2, body.length, w - 1);
+      sh.setConditionalFormatRules(sh.getConditionalFormatRules().concat(
+        SpreadsheetApp.newConditionalFormatRule().setGradientMinpoint('#ffffff').setGradientMaxpoint('#7fa8e8').setRanges([heat]).build()));
+    }
+    if (b.chart && b.rows.length) {
+      sh.insertChart(sh.newChart().setChartType(Charts.ChartType.BAR)
+        .addRange(sh.getRange(row + 1, 1, body.length, 2))
+        .setPosition(row, 8, 0, 0)
+        .setOption('title', b.chart).setOption('legend', { position: 'none' })
+        .setOption('colors', ['#2f6fde']).setOption('width', 460).setOption('height', Math.max(200, body.length * 30 + 60))
+        .build());
+    }
+    row += body.length + 3;
+  });
+  sh.setColumnWidth(1, 230);
+  sh.setColumnWidths(2, 5, 110);
+  sh.setColumnWidth(5, 220);
+  sh.setFrozenRows(2);
+}
