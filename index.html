@@ -86,6 +86,8 @@
   .vframe{position:relative;height:620px;border-radius:10px;overflow:hidden;background:#eef1f6}
   .vframe iframe{width:100%;height:100%;border:0;display:block}
   .vframe .none{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:20px;font-size:14px;color:var(--sub)}
+  .vframe .cover{position:absolute;inset:0;border:0;padding:0;background:transparent;cursor:pointer}
+  .vnote{margin:10px 0 0;padding:9px 11px;border-radius:9px;background:#f4f6fa;font-size:12px;line-height:1.55;color:var(--sub)}
   .vopen{display:block;margin:8px 0 14px;font-size:13px;color:var(--accent);text-align:center}
   .vbtns{display:flex;flex-direction:column;gap:8px;margin-top:14px}
   .vbtns .no{background:#eef1f6;color:var(--text)}
@@ -221,7 +223,8 @@
     <p class="hint">끝까지 보고, 우리 학교 계정에서 이런 걸 보고 싶은지 골라줘요.</p>
     <div id="vbox">
       <div class="vprog"><span id="vleft"></span><span id="vtoday"></span></div>
-      <div class="vframe"><iframe id="vfr" title="릴스" allow="autoplay; encrypted-media" allowfullscreen></iframe><div class="none" id="vnone">여기서 바로 볼 수 없는 링크예요.<br>아래 링크로 열어서 봐 줘요.</div></div>
+      <div class="vframe"><iframe id="vfr" title="릴스" allow="autoplay; encrypted-media" allowfullscreen></iframe><button type="button" class="cover" id="vcover" aria-label="영상 창 열기"></button><div class="none" id="vnone">여기서 바로 볼 수 없는 링크예요.<br>아래 링크로 열어서 봐 줘요.</div></div>
+      <p class="vnote">🎵 재생 버튼 아래 「Instagram에서 보기」가 뜨는 영상은 음원 때문에 인스타에서 열려요.<br>보고 이 화면으로 돌아오면 바로 평가할 수 있어요.</p>
       <a class="vopen" id="vopen" target="_blank" rel="noopener">영상이 안 보이면 ↗ 앱에서 열기</a>
       <p class="q" style="font-size:14px">어느 계정에 어울려? (선택)</p>
       <div class="chips">
@@ -439,10 +442,25 @@
     $('vnone').style.display = src ? 'none' : 'flex';
     $('vfr').src = src || 'about:blank';
     $('vopen').href = u;
+    $('vcover').style.display = /instagram\.com/i.test(u) && !isPhone ? 'block' : 'none';
     $('vleft').textContent = `남은 영상 ${vLeft}개`;
     $('vtoday').textContent = `오늘 평가 ${vTodayCount()}개`;
     document.querySelectorAll('input[name="acc"]').forEach(x => x.checked = false);
   }
+
+  // 인스타 임베드는 음원 저작권 등으로 페이지 안에서 재생이 막히는 영상이 많다.
+  // 누르면 새 탭으로 넘어가는 대신 화면 오른쪽에 폰 크기 창을 띄우고, 다음 영상도 같은 창에서 연다.
+  // 폰에서는 앱으로 여는 편이 나아서 그대로 둔다.
+  const isPhone = /Android|iPhone|iPad/i.test(navigator.userAgent);
+  function openReel(e) {
+    const u = queue[0];
+    if (!u || isPhone) return;
+    const w = 420, h = Math.min(860, screen.availHeight - 60);
+    const win = window.open(u, 'jjuReel', `popup,width=${w},height=${h},left=${screen.availWidth - w - 20},top=30`);
+    if (win) { e.preventDefault(); win.focus(); }
+  }
+  $('vcover').addEventListener('click', openReel);
+  $('vopen').addEventListener('click', openReel);
 
   function loadQueue() {
     if (!me.nick) return openSetup();
