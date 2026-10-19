@@ -20,11 +20,14 @@ function doGet() {
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-/** GitHub Pages(index.html)에서 보내는 제보 받기 */
+/** GitHub Pages(index.html)에서 보내는 제보·교차 평가 받기 (action 없음 = 제보) */
 function doPost(e) {
   let res;
   try {
-    res = submitReel(JSON.parse(e.postData.contents));
+    const data = JSON.parse(e.postData.contents);
+    res = data.action === 'queue' ? getQueue(data)
+      : data.action === 'vote' ? submitVote(data)
+      : submitReel(data);
   } catch (err) {
     res = { ok: false, msg: '저장 중 오류가 났어요. 잠시 후 다시 시도해 줘요.' };
   }
@@ -161,6 +164,90 @@ function syncProfilesNow() {
 }
 
 /* =====================================================================
+ *  🗳️ 교차 평가 — 다른 조사자가 제보한 릴스를 "우리 계정에서 보고 싶다 / 아니다"로 평가
+ *  릴스마다 여러 명의 판단이 쌓이게, 평가 수가 적은 영상부터 내려준다
+ * ===================================================================== */
+const VOTE_SHEET = '교차평가';
+const VOTE_HEADERS = ['평가일시', '평가자', 'URL', '판단', '어울리는 계정'];
+const VOTE_YES = '보고 싶다', VOTE_NO = '아니다', VOTE_SKIP = '못 봄';
+const QUEUE_SIZE = 10;
+const MIN_VOTES = 3;  // 평가 3명 미만은 분석 탭에 "표본 적음"
+
+function getVoteSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(VOTE_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(VOTE_SHEET);
+    sh.appendRow(VOTE_HEADERS);
+    sh.setFrozenRows(1);
+    sh.getRange(1, 1, 1, VOTE_HEADERS.length)
+      .setFontWeight('bold').setBackground('#1f3a5f').setFontColor('#ffffff');
+    sh.setColumnWidth(3, 260);
+  }
+  return sh;
+}
+
+/** 별명 비교용: 앞뒤·중간 공백, 보이지 않는 글자, 한글 조합 방식 차이를 없앤다 */
+function nickKey_(v) {
+  return String(v == null ? '' : v).normalize('NFC').replace(/[\s​-‏⁠﻿]/g, '');
+}
+
+function bodyRows_(sh, ncol) {
+  const last = sh.getLastRow();
+  return last > 1 ? sh.getRange(2, 1, last - 1, ncol).getValues() : [];
+}
+
+/** 평가할 영상 목록: 내가 제보했거나 이미 평가한 영상, 스토리 링크(24시간 뒤 사라짐)는 뺀다 */
+function getQueue(data) {
+  const name = nickKey_(data && data.name);
+  if (!name) return { ok: false, msg: '별명을 먼저 정해줘요!' };
+
+  const cnt = {}, mine = {};
+  let own = 0;  // 내가 제보해서 빠진 영상 수
+  bodyRows_(getVoteSheet_(), 4).forEach(v => {
+    const u = String(v[2]);
+    if (nickKey_(v[1]) === name) mine[u] = 1;
+    if (v[3] === VOTE_YES || v[3] === VOTE_NO) cnt[u] = (cnt[u] || 0) + 1;
+  });
+
+  const seen = {};
+  const pool = bodyRows_(getSheet_(), 4)   // 제출일시 | 별명 | 학년 | URL
+    .map(r => ({ nick: nickKey_(r[1]), url: String(r[3]) }))
+    .filter(r => {
+      if (r.url && r.nick === name) own++;
+      if (!r.url || seen[r.url] || r.nick === name || mine[r.url] || /\/stories\//i.test(r.url)) return false;
+      return (seen[r.url] = true);
+    })
+    .map(r => ({ url: r.url, n: cnt[r.url] || 0, k: Math.random() }))
+    .sort((a, b) => a.n - b.n || a.k - b.k);
+
+  return { ok: true, items: pool.slice(0, QUEUE_SIZE).map(r => r.url), left: pool.length, own: own };
+}
+
+function submitVote(data) {
+  const name = nickKey_(data && data.name);
+  const url = normalizeUrl_(data && data.url);
+  const verdict = [VOTE_YES, VOTE_NO, VOTE_SKIP].indexOf(data && data.verdict) !== -1 ? data.verdict : '';
+  if (!name || !url || !verdict) {
+    return { ok: false, msg: '평가가 저장되지 않았어요. 다시 눌러줘요.' };
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sh = getVoteSheet_();
+    // 같은 사람이 같은 영상을 두 번 평가하면 처음 것만 남김 (버튼 연타·재전송 대비)
+    const dup = bodyRows_(sh, 3).some(v => nickKey_(v[1]) === name && String(v[2]) === url);
+    if (!dup) {
+      sh.appendRow([new Date(), clean_(name), url, verdict, verdict === VOTE_YES ? clean_(data.account) : '']);
+    }
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* =====================================================================
  *  📊 분석 탭 — 메뉴 [📊 릴스 분석 → 분석 새로고침] 또는 매일 아침 자동 갱신
  * ===================================================================== */
 const REPORT_SHEET = '분석';
@@ -181,8 +268,8 @@ function enableDailyReport() {
   try { SpreadsheetApp.getUi().alert('매일 아침 8시에 분석 탭이 자동으로 갱신돼요.'); } catch (e) {}
 }
 
-/** 순수 계산부: 시트 값(2차원 배열) → 표 블록들 */
-function computeReport_(values) {
+/** 순수 계산부: 시트 값(2차원 배열) → 표 블록들. votes는 교차평가 탭 값(없으면 빈 배열) */
+function computeReport_(values, votes) {
   const head = values[0].map(String);
   const col = name => head.indexOf(name);
   const split = v => String(v == null ? '' : v).split(',').map(s => s.trim()).filter(Boolean);
@@ -235,20 +322,41 @@ function computeReport_(values) {
     .slice(0, 20)
     .map(r => [r.score, r.kinds.join(', '), r.whys.join(', '), r.acts.join(', '), r.comment, r.url]);
 
+  // 교차 평가 집계: 영상별 보고 싶다 / 아니다 (못 봄은 세지 않음)
+  const V = {};
+  let voteN = 0;
+  (votes || []).slice(1).forEach(v => {
+    const u = String(v[2] || '');
+    if (!u || (v[3] !== VOTE_YES && v[3] !== VOTE_NO)) return;
+    const g = V[u] || (V[u] = { y: 0, n: 0, acc: {} });
+    voteN++;
+    if (v[3] === VOTE_YES) { g.y++; split(v[4]).forEach(a => g.acc[a] = (g.acc[a] || 0) + 1); }
+    else g.n++;
+  });
+  const voted = recs.filter(r => V[r.url]).map(r => {
+    const g = V[r.url], t = g.y + g.n;
+    const acc = Object.keys(g.acc).sort((a, b) => g.acc[b] - g.acc[a])[0] || '';
+    return [pct(g.y, t), t, g.y, acc, r.score, r.kinds.join(', '), r.comment, r.url, t < MIN_VOTES ? '표본 적음' : ''];
+  }).sort((a, b) => (b[1] >= MIN_VOTES) - (a[1] >= MIN_VOTES) || b[0] - a[0] || b[1] - a[1]);
+
   return [
     { title: '① 한눈에 보기', headers: ['지표', '값'], fmt: [null, null], rows: [
       ['총 제보', N + '건'],
       ['참여 조사자', Object.keys(nicks).length + '명'],
       ['평균 별점', N ? (recs.reduce((s, r) => s + r.score, 0) / N).toFixed(2) + ' / 5' : '-'],
       ['"대학 계정이 해도 볼 것 같다"', Math.round(pct(recs.filter(r => r.univYes).length, N) * 100) + '%'],
-      ['강한 반응(돌려봄·공유·저장·팔로우)', Math.round(pct(recs.filter(r => r.strong).length, N) * 100) + '%']
+      ['강한 반응(돌려봄·공유·저장·팔로우)', Math.round(pct(recs.filter(r => r.strong).length, N) * 100) + '%'],
+      ['교차 평가', `${voteN}표 · 평가받은 영상 ${voted.length}개 · ${MIN_VOTES}명 이상 평가 ${voted.filter(r => r[1] >= MIN_VOTES).length}개`]
     ] },
     { title: '② 어떤 영상에 반응했나 (영상 유형)', headers: statHead, fmt: statFmt, rows: group(r => r.kinds), chart: '영상 유형별 제보 수' },
     { title: '③ 왜 끝까지 봤나 (끌린 이유)', headers: statHead, fmt: statFmt, rows: group(r => r.whys), chart: '끌린 이유별 제보 수' },
     { title: '④ 보고 나서 한 행동', headers: statHead, fmt: statFmt, rows: group(r => r.acts) },
     Object.assign({ title: '⑤ 성별로 좋아하는 영상 유형 (각 성별 제보 중 비율)', fmtAll: '0%' }, cross(r => r.gender, r => r.kinds)),
     Object.assign({ title: '⑥ 학년별로 좋아하는 영상 유형 (각 학년 제보 중 비율)', fmtAll: '0%' }, cross(r => r.grade, r => r.kinds)),
-    { title: '⑦ 벤치마킹 후보 (별점 4+ & 대학 계정이 해도 볼 것 같다)', headers: ['별점', '영상 유형', '끌린 이유', '반응', '한마디', 'URL'], fmt: ['0', null, null, null, null, null], rows: top }
+    { title: '⑦ 벤치마킹 후보 (별점 4+ & 대학 계정이 해도 볼 것 같다)', headers: ['별점', '영상 유형', '끌린 이유', '반응', '한마디', 'URL'], fmt: ['0', null, null, null, null, null], rows: top },
+    { title: `⑧ 교차 평가 순위 (제보자 말고 다른 조사자가 "보고 싶다"를 누른 비율 · ${MIN_VOTES}명 미만은 표본 적음)`,
+      headers: ['보고 싶다 비율', '평가 수', '보고 싶다', '어울리는 계정', '제보 별점', '영상 유형', '한마디', 'URL', '비고'],
+      fmt: ['0%', '0', '0', null, '0', null, null, null, null], rows: voted }
   ];
 }
 
@@ -256,7 +364,8 @@ function buildReport() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const src = getSheet_();
   syncProfiles_(src);
-  const blocks = computeReport_(src.getDataRange().getValues());
+  const vs = ss.getSheetByName(VOTE_SHEET);
+  const blocks = computeReport_(src.getDataRange().getValues(), vs ? vs.getDataRange().getValues() : []);
 
   let sh = ss.getSheetByName(REPORT_SHEET) || ss.insertSheet(REPORT_SHEET, 0);
   sh.getCharts().forEach(c => sh.removeChart(c));
