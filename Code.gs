@@ -171,6 +171,7 @@ const VOTE_SHEET = '교차평가';
 const VOTE_HEADERS = ['평가일시', '평가자', 'URL', '판단', '어울리는 계정'];
 const VOTE_YES = '보고 싶다', VOTE_NO = '아니다', VOTE_SKIP = '못 봄';
 const QUEUE_SIZE = 10;
+const TOP_PICKS = 3;  // 제보자가 하루에 낸 영상 중 평가에 올리는 개수
 const MIN_VOTES = 3;  // 평가 3명 미만은 분석 탭에 "표본 적음"
 
 function getVoteSheet_() {
@@ -197,7 +198,31 @@ function bodyRows_(sh, ncol) {
   return last > 1 ? sh.getRange(2, 1, last - 1, ncol).getValues() : [];
 }
 
-/** 평가할 영상 목록: 내가 제보했거나 이미 평가한 영상, 스토리 링크(24시간 뒤 사라짐)는 뺀다 */
+/**
+ * 제보자가 하루에 낸 영상 중 상위 TOP_PICKS개만 평가에 올린다 (스토리 링크는 순위 전에 뺌)
+ * 순위: 별점 → 강한 반응(돌려봄·공유·저장·팔로우) → 대학 계정 "볼 것 같다" → 먼저 낸 것
+ */
+function topPicks_(rows) {
+  const groups = {};
+  rows.forEach(r => {   // 제출일시 | 별명 | 학년 | URL | 플랫폼 | 별점 | 유형 | 이유 | 반응 | 대학 계정
+    const url = String(r[3]), nick = nickKey_(r[1]);
+    if (!url || !nick || /\/stories\//i.test(url)) return;
+    const t = r[0] instanceof Date ? r[0] : new Date(r[0]);
+    const day = isNaN(t) ? '' : Utilities.formatDate(t, 'Asia/Seoul', 'yyyy-MM-dd');
+    const acts = String(r[8]).split(',').map(s => s.trim());
+    (groups[nick + '|' + day] = groups[nick + '|' + day] || []).push({
+      nick: nick, url: url, t: isNaN(t) ? 0 : t.getTime(),
+      score: Number(r[5]) || 0,
+      strong: acts.some(a => STRONG_ACTIONS.indexOf(a) !== -1) ? 1 : 0,
+      ok: r[9] === '볼 것 같다' ? 1 : 0
+    });
+  });
+  return Object.keys(groups).reduce((out, k) => out.concat(groups[k]
+    .sort((a, b) => b.score - a.score || b.strong - a.strong || b.ok - a.ok || a.t - b.t)
+    .slice(0, TOP_PICKS)), []);
+}
+
+/** 평가할 영상 목록: 제보자별 하루 상위 3개 중 내가 제보했거나 이미 평가한 영상, 스토리 링크(24시간 뒤 사라짐)는 뺀다 */
 function getQueue(data) {
   const name = nickKey_(data && data.name);
   if (!name) return { ok: false, msg: '별명을 먼저 정해줘요!' };
@@ -211,11 +236,10 @@ function getQueue(data) {
   });
 
   const seen = {};
-  const pool = bodyRows_(getSheet_(), 4)   // 제출일시 | 별명 | 학년 | URL
-    .map(r => ({ nick: nickKey_(r[1]), url: String(r[3]) }))
+  const pool = topPicks_(bodyRows_(getSheet_(), 10))
     .filter(r => {
-      if (r.url && r.nick === name) own++;
-      if (!r.url || seen[r.url] || r.nick === name || mine[r.url] || /\/stories\//i.test(r.url)) return false;
+      if (r.nick === name) { own++; return false; }
+      if (seen[r.url] || mine[r.url]) return false;
       return (seen[r.url] = true);
     })
     .map(r => ({ url: r.url, n: cnt[r.url] || 0, k: Math.random() }))

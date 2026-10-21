@@ -219,8 +219,8 @@
 
 <section id="vote">
   <div class="card">
-    <p class="q">다른 친구가 제보한 릴스예요</p>
-    <p class="hint">끝까지 보고, 우리 학교 계정에서 이런 걸 보고 싶은지 골라줘요.</p>
+    <p class="q">다른 친구가 제보한 릴스 베스트예요</p>
+    <p class="hint">친구마다 그날 낸 영상 중 별점 높은 3개만 모았어요. 끝까지 보고, 우리 학교 계정에서 이런 걸 보고 싶은지 골라줘요.</p>
     <div id="vbox">
       <div class="vprog"><span id="vleft"></span><span id="vtoday"></span></div>
       <div class="vframe"><iframe id="vfr" title="릴스" allow="autoplay; encrypted-media" allowfullscreen></iframe><button type="button" class="cover" id="vcover" aria-label="영상 창 열기"></button><div class="none" id="vnone">여기서 바로 볼 수 없는 링크예요.<br>아래 링크로 열어서 봐 줘요.</div></div>
@@ -410,7 +410,7 @@
   });
 
   // ── 교차 평가: 다른 사람이 제보한 릴스를 보고 "우리 계정에서 보고 싶다 / 아니다" ──
-  // 서버가 평가 수가 적은 영상부터 10개씩 내려줌 (내가 제보했거나 이미 평가한 영상은 빠짐)
+  // 서버가 제보자별 하루 상위 3개 중 평가 수가 적은 영상부터 10개씩 내려줌 (내가 제보했거나 이미 평가한 영상은 빠짐)
   const queue = [];
   let mode = 'submit', vLeft = 0, vBusy = false;
   const post = body => fetch(GAS_URL, {
